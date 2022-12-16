@@ -1,4 +1,3 @@
-
 #Copyright (C) 2021 Fanwei Kong, Shawn C. Shadden, University of California, Berkeley
 
 #Licensed under the Apache License, Version 2.0 (the "License");
@@ -47,8 +46,10 @@ def generate_seg_aug_dataset(im_dir, mask_dir, out_dir, modality, mode='train', 
         except Exception as e: print(e)
         fns = sorted(glob.glob(os.path.join(im_dir, '*.nii.gz'))+
             glob.glob(os.path.join(im_dir, '*.nii')))
-        fns_masks = sorted(glob.glob(os.path.join(mask_dir, '*.nii.gz'))+
-            glob.glob(os.path.join(mask_dir, '*.nii')))
+        fns_masks = []
+        for fn in fns:
+            name = os.path.basename(fn).split('.')[0]
+            fns_masks.append(sorted(glob.glob(os.path.join(mask_dir, name+'*.nii'))))
         fns_all = []
         fns_all_masks = []
         nums = []
@@ -81,14 +82,16 @@ def generate_seg_aug_dataset(im_dir, mask_dir, out_dir, modality, mode='train', 
         fns_masks_scatter = comm.scatter(fns_masks_scatter, root = 0)
         fns_scatter  = comm.scatter(fns_scatter, root = 0)
     for fn, fn_mask, aug_id in zip(fns_scatter, fns_masks_scatter, nums_scatter):
+        print(fn, fn_mask)
         name = os.path.basename(fn).split(os.extsep, 1)[0]
-        name_seg = os.path.basename(fn_mask).split(os.extsep, 1)[0]
-        assert name == name_seg , "Image and mask file names do not match!"
         image = sitk.ReadImage(fn)
-        mask = sitk.ReadImage(fn_mask)
+        
+        masks = []
+        for mask in fn_mask:
+            masks.append(sitk.ReadImage(mask))
        
-        params_bspline['mask'] = mask
-        params_affine['mask'] = mask
+        params_bspline['mask'] = masks
+        params_affine['mask'] = masks
         
         affine = AffineTransform(image, **params_affine)
         bspline = NonlinearTransform(image, **params_bspline)
@@ -102,24 +105,28 @@ def generate_seg_aug_dataset(im_dir, mask_dir, out_dir, modality, mode='train', 
         affine.clear_transform()
         bspline.clear_transform()
         
-        im_out = os.path.join(out_dir, modality+'_%s' % mode, name+'_'+str(aug_id)+'.nii.gz')
-        mask_out = os.path.join(out_dir, modality+'_%s_seg' % mode, name+'_'+str(aug_id)+'.nii.gz')
+        im_out = os.path.join(out_dir, modality+'_%s' % mode, 'aug'+ str(aug_id) + '_' + name +'.nii.gz')
+        print("Writing augmentation of image " + name)
         sitk.WriteImage(output[0], im_out)
         
-        mask_aug_py = sitk.GetArrayFromImage(output[1])
-        for i in np.unique(mask_aug_py):
-            tmp = mask_aug_py==i
-            true_im = sitk.GetImageFromArray(tmp.astype(np.uint8))
-            filt = sitk.BinaryMedianImageFilter()
-            filt.SetRadius(3)
-            out = filt.Execute(true_im)
-            true_im_py = sitk.GetArrayFromImage(out)
-            mask_aug_py[true_im_py==1] = i
-        mask_aug = sitk.GetImageFromArray(mask_aug_py)
-        mask_aug.SetOrigin(output[0].GetOrigin())
-        mask_aug.SetSpacing(output[0].GetSpacing())
-        mask_aug.SetDirection(output[0].GetDirection())
-        sitk.WriteImage(mask_aug, mask_out)
+        for j in range(len(masks)):
+            mask_aug_py = sitk.GetArrayFromImage(output[1][j])
+            for i in np.unique(mask_aug_py):
+                tmp = mask_aug_py==i
+                true_im = sitk.GetImageFromArray(tmp.astype(np.uint8))
+                filt = sitk.BinaryMedianImageFilter()
+                filt.SetRadius(3)
+                out = filt.Execute(true_im)
+                true_im_py = sitk.GetArrayFromImage(out)
+                mask_aug_py[true_im_py==1] = i
+            mask_aug = sitk.GetImageFromArray(mask_aug_py)
+            mask_aug.SetOrigin(output[0].GetOrigin())
+            mask_aug.SetSpacing(output[0].GetSpacing())
+            mask_aug.SetDirection(output[0].GetDirection())
+            name_seg = os.path.basename(fn_mask[j]).split(os.extsep, 1)[0]
+            print("Writing segmentation " + name_seg)
+            mask_out = os.path.join(out_dir, modality+'_%s_seg' % mode, 'aug'+ str(aug_id) + '_' + name_seg + '.nii.gz')
+            sitk.WriteImage(mask_aug, mask_out)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

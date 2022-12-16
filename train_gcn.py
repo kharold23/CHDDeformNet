@@ -140,7 +140,16 @@ model = DeformNet(args.batch_size, img_shape, mesh_info, amplify_factor=args.amp
 unet_gcn = model.build_keras()
 unet_gcn.summary(line_length=150)
 
-adam = Adam(lr=args.lr, beta_1=0.9, beta_2=0.999, epsilon=None, decay=1e-6, amsgrad=True)
+learn_rate = args.lr
+try:
+    with open(save_loss_path+"_history", 'rb')as handle:
+        unserialized_data = pickle.load(handle)
+    learn_rate = unserialized_data['lr'][-1]
+    print("Loaded lr from checkpoint.")
+except Exception as e:
+    print("Learning rate not loaded", e)
+    
+adam = Adam(lr=learn_rate, beta_1=0.9, beta_2=0.999, epsilon=None, decay=1e-6, amsgrad=True)
 output_keys = [node.op.name.split('/')[0] for node in unet_gcn.outputs]
 print("Output Keys: ", output_keys)
 if args.num_seg >0:
@@ -165,25 +174,25 @@ unet_gcn.compile(optimizer=adam, loss=losses,loss_weights=loss_weights,  metrics
 """ Setup model checkpoint """
 save_model_path = os.path.join(args.output, "weights_gcn.hdf5")
 
-cp_cd = SaveModelOnCD(metric_key, save_model_path, patience=50)
-lr_schedule = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.8, patience=10, min_lr=0.000005)
-call_backs = [cp_cd,lr_schedule]
+cp_cd = SaveModelOnCD(metric_key, save_model_path, patience=20)
+lr_schedule = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=10, min_lr=0.000005)
+call_backs = [cp_cd, lr_schedule]
 
 try:
     if args.pre_train != '':
         unet_gcn.load_weights(args.pre_train)
     else:
         unet_gcn.load_weights(save_model_path)
+        print("Loaded weights from checkpoint.")
 except Exception as e:
   print("Model not loaded", e)
 
 """ Training """
 history =unet_gcn.fit(train_ds, 
-                   steps_per_epoch=int(np.ceil(num_train_examples/float(args.batch_size))),
+                   steps_per_epoch= int(np.ceil(num_train_examples/float(args.batch_size))),
                    epochs=args.num_epoch,
                    validation_data=val_ds,
                    validation_steps= int(np.ceil(num_val_examples / float(args.batch_size))),
                    callbacks=call_backs)
 with open(save_loss_path+"_history", 'wb') as handle: # saving the history 
         pickle.dump(history.history, handle)
-

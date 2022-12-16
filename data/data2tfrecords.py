@@ -55,7 +55,7 @@ def transform_polydata(poly, displacement, transform, size):
     normals = get_point_normals(poly)
     return np.hstack((coords, normals)), poly
 
-def process_image(image, mask, size, m, intensity, seg_id, deci_rate, smooth_iter):
+def process_image(image, masks, size, m, intensity, seg_id, deci_rate, smooth_iter):
     img_center = np.array(image.TransformContinuousIndexToPhysicalPoint(np.array(image.GetSize())/2.0))
     
     imgVol = resample_spacing(image, template_size=size, order=1)[0]  # numpy array
@@ -64,22 +64,27 @@ def process_image(image, mask, size, m, intensity, seg_id, deci_rate, smooth_ite
     spacing = np.array(imgVol.GetSpacing())
     img_py = RescaleIntensity(sitk.GetArrayFromImage(imgVol).transpose(2,1,0), m, intensity).astype(np.float32)
     transform = build_transform_matrix(imgVol)
-        
-    seg_py = swapLabels_ori(sitk.GetArrayFromImage(mask).transpose(2, 1, 0).astype(np.int64))
-    segVol_swap = sitk.GetImageFromArray(seg_py.transpose(2,1,0).astype(np.uint8))
-    segVol_swap.CopyInformation(mask)
+    
+    
     mesh_all_list, mesh_all_py_list = [], []
-    segVol_swap_vtk = exportSitk2VTK(segVol_swap, spacing=[1.5,1.5,1.5])[0]
-    for s, s_id in enumerate(seg_id):
-        mesh = smooth_polydata(vtk_marching_cube(segVol_swap_vtk, 0, s_id), iteration=smooth_iter) 
+    for mask in masks:
+        seg_py = swapLabels_ori(sitk.GetArrayFromImage(mask).transpose(2, 1, 0).astype(np.int64))
+        segVol_swap = sitk.GetImageFromArray(seg_py.transpose(2,1,0).astype(np.uint8))
+        segVol_swap.CopyInformation(mask)
+        segVol_swap_vtk = exportSitk2VTK(segVol_swap, spacing=[1.5,1.5,1.5])[0]
+        mesh = smooth_polydata(vtk_marching_cube(segVol_swap_vtk, 0, 1), iteration=smooth_iter) 
         mesh = bound_polydata_by_image(segVol_swap_vtk, mesh, 1.5)
         mesh = decimation(mesh, deci_rate)
         mesh_py, mesh_poly = transform_polydata(mesh, img_center2-img_center, transform, size)
         mesh_all_list.append(mesh_poly)
         mesh_all_py_list.append(mesh_py)
     # write GT files to disk
-    segVol = resample_spacing(mask, template_size=size, order=0)[0]
+    segVol = resample_spacing(masks[0], template_size=size, order=0)[0]
     seg_py = swapLabels_ori(sitk.GetArrayFromImage(segVol).transpose(2, 1, 0).astype(np.int64))
+    for mask in masks[1:]:
+        segVol_i = resample_spacing(mask, template_size=size, order=0)[0]
+        seg_py_i = swapLabels_ori(sitk.GetArrayFromImage(segVol).transpose(2, 1, 0).astype(np.int64))
+        seg_py = np.logical_or(seg_py, seg_py_i)
     return [img_py, mesh_all_py_list, seg_py, transform, spacing], mesh_all_list
 
 def process_image_w_random_crops(image, mask, size, m, intensity, seg_id, deci_rate, smooth_iter):
@@ -100,9 +105,13 @@ def data_preprocess(modality,data_folder, data_folder_out, fn, intensity, size, 
         for subject_dir in natural_sort(glob.glob(os.path.join(data_folder,m+fn,'*.nii.gz')) \
                 +glob.glob(os.path.join(data_folder,m+fn,'*.nii')) ):
             imgVol_fn.append(os.path.realpath(subject_dir))
-        for subject_dir in natural_sort(glob.glob(os.path.join(data_folder,m+fn+'_seg','*.nii.gz')) \
-                +glob.glob(os.path.join(data_folder,m+fn+'_seg','*.nii')) ):
-            seg_fn.append(os.path.realpath(subject_dir))
+            name = os.path.basename(subject_dir).split('.')[0]
+            masks = []
+            for mask_dir in natural_sort(glob.glob(os.path.join(data_folder,m+fn+'_seg', name + '*.nii.gz')) \
+                +glob.glob(os.path.join(data_folder,m+fn+'_seg', name + '*.nii')) ):
+                    masks.append(os.path.realpath(mask_dir))
+            print(subject_dir, masks)
+            seg_fn.append(masks)
         print("number of training data %d" % len(imgVol_fn))
         print("number of training data segmentation %d" % len(seg_fn))
         assert len(seg_fn) == len(imgVol_fn)
@@ -114,8 +123,10 @@ def data_preprocess(modality,data_folder, data_folder_out, fn, intensity, size, 
         for i in range(num_fns):
             output_path =  os.path.join(data_folder_out, m+fn, os.path.basename(imgVol_fn[i]))
             img_path, seg_path = imgVol_fn[i], seg_fn[i]
-            assert os.path.basename(img_path).split('.')[0] == os.path.basename(seg_path).split('.')[0], "Incosistent image and seg name"
-            tfrecords, mesh_all_list = process_image(sitk.ReadImage(img_path), sitk.ReadImage(seg_path), size, m, intensity, seg_id, deci_rate, smooth_iter)
+            print(img_path, seg_path)
+            #assert os.path.basename(img_path).split('.')[0] == os.path.basename(seg_path).split('.')[0], "Incosistent image and seg name"
+            masks = [sitk.ReadImage(seg) for seg in seg_path]
+            tfrecords, mesh_all_list = process_image(sitk.ReadImage(img_path), masks, size, m, intensity, seg_id, deci_rate, smooth_iter)
             # compute centroid and radius for mesh initialization 
             for s, (mesh_poly, mesh_py) in enumerate(zip(mesh_all_list, tfrecords[1])):
                 mesh_area[s] = mesh_area[s] + get_poly_surface_area(mesh_poly)/num_fns/np.mean(np.array(size))/np.mean(np.array(size))

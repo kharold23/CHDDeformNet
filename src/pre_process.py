@@ -84,9 +84,8 @@ def transform_func(image, reference_image, transform, order=1):
     try:
       resampled = sitk.Resample(image, reference_image, transform,
                          interpolator, default_value)
+      return resampled
     except Exception as e: print(e)
-
-    return resampled
 
 def reference_image_build(spacing, size, template_size, dim):
     #template size: image(array) dimension to resize to: a list of three elements
@@ -111,8 +110,9 @@ def centering(img, ref_img, order=1):
   img_center = np.array(img.TransformContinuousIndexToPhysicalPoint(np.array(img.GetSize())/2.0))
   reference_center = np.array(ref_img.TransformContinuousIndexToPhysicalPoint(np.array(ref_img.GetSize())/2.0))
   centering_transform.SetOffset(np.array(transform.GetInverse().TransformPoint(img_center) - reference_center))
-  centered_transform = sitk.Transform(transform)
-  centered_transform.AddTransform(centering_transform)
+  centered_transform = sitk.CompositeTransform([transform, centering_transform])
+  # centered_transform = sitk.Transform(transform)
+  # centered_transform.AddTransform(centering_transform)
 
   return transform_func(img, ref_img, centered_transform, order)
 
@@ -201,6 +201,7 @@ class SpatialTransform(object):
             output.append(out_mesh)
         return output
     def add_transform(self, transform):
+        #total = sitk.CompositeTransform([self.transform, transform])
         total = sitk.Transform(self.transform)
         total.AddTransform(transform)
         self.transform = total
@@ -224,6 +225,7 @@ class AffineTransform(SpatialTransform):
         scale = np.diag(np.random.uniform(self.scale_range[0], self.scale_range[1], self.dim))
         scale_trans.SetMatrix(scale.ravel())
         scale_trans.SetCenter(self.image.TransformContinuousIndexToPhysicalPoint(np.array(self.image.GetSize())/2.0))
+        #self.transform = sitk.CompositeTransform([self.transform, scale_trans])
         self.transform.AddTransform(scale_trans)
 
     def rotate(self):
@@ -237,12 +239,14 @@ class AffineTransform(SpatialTransform):
         rotate_trans = sitk.AffineTransform(3)
         rotate_trans.SetMatrix(rot_matrix.ravel())
         rotate_trans.SetCenter(self.image.TransformContinuousIndexToPhysicalPoint(np.array(self.image.GetSize())/2.0))
+        # self.transform = sitk.CompositeTransform([self.transform, rotate_trans])
         self.transform.AddTransform(rotate_trans)
     
     def translate(self):
         t_trans = sitk.AffineTransform(3)
         params = np.random.uniform(self.trans_range[0],self.trans_range[1], self.dim)
         t_trans.SetTranslation(params)
+        #self.transform = sitk.CompositeTransform([self.transform, t_trans])
         self.transform.AddTransform(t_trans)
 
     def shear(self):
@@ -251,6 +255,7 @@ class AffineTransform(SpatialTransform):
         shear_trans.Shear(int(axis[0]), int(axis[1]), np.random.uniform(self.shear_range[0], 
             self.shear_range[1]))
         shear_trans.SetCenter(self.image.TransformContinuousIndexToPhysicalPoint(np.array(self.image.GetSize())/2.0))
+        #self.transform = sitk.CompositeTransform([self.transform, shear_trans])
         self.transform.AddTransform(shear_trans)
     
     def flip(self):
@@ -260,6 +265,7 @@ class AffineTransform(SpatialTransform):
         flip_trans = sitk.AffineTransform(3)
         flip_trans.SetMatrix(flip_matrix.ravel())
         flip_trans.SetCenter(self.image.TransformContinuousIndexToPhysicalPoint(np.array(self.image.GetSize())/2.0))
+        #self.transform = sitk.CompositeTransform([self.transform, flip_trans])
         self.transform.AddTransform(flip_trans)
 
     def affine(self):
@@ -272,9 +278,14 @@ class AffineTransform(SpatialTransform):
         output = []
         out_im = transform_func(self.image, self.ref, self.transform, order=1)
         output.append(out_im)
+        # change self.mask to a list of masks
         if self.mask is not None:
-            out_mask = transform_func(self.mask, self.ref, self.transform, order=0)
-            output.append(out_mask)
+            # loop over list
+            masks = []
+            for mask in self.mask:
+                out_mask = transform_func(mask, self.ref, self.transform, order=0)
+                masks.append(out_mask)
+            output.append(masks)
         if self.mesh is not None:
             #out_mesh = np.copy(self.mesh)
             #Had to do a copy like this not sure why
@@ -322,9 +333,14 @@ class NonlinearTransform(SpatialTransform):
         output = []
         out_im = transform_func(self.image, self.ref, self.transform, order=1)
         output.append(out_im)
+        # list of masks
         if self.mask is not None:
-            out_mask = transform_func(self.mask, self.ref, self.transform, order=0)
-            output.append(out_mask)
+            # loop over list
+            masks = []
+            for mask in self.mask:
+                out_mask = transform_func(mask, self.ref, self.transform, order=0)
+                masks.append(out_mask)
+            output.append(masks)
         if self.mesh is not None:
             #out_mesh = np.copy(self.mesh)
             #Had to do a copy like this not sure why
@@ -435,7 +451,7 @@ def reference_image_full(im, transform_matrix):
         physical[i, :] = im.TransformContinuousIndexToPhysicalPoint(np.array(ids_i)/1.)
     center = np.mean(physical, axis=0)
     physical -= center
-    physical_trans = (transform_matrix @ physical.transpose()).transpose()
+    physical_trans = np.matmul(transform_matrix, physical.transpose()).transpose()
 
     new_origin = np.min(physical_trans, axis=0) 
     new_bound = np.max(physical_trans, axis=0)
@@ -454,7 +470,7 @@ def compute_rotation_matrix(vec1, vec2):
     s = np.linalg.norm(v)
     c = np.dot(vec1, vec2)
     v_x = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
-    R = np.eye(3) + v_x + (v_x @ v_x)*(1-c)/s/s
+    R = np.eye(3) + v_x + np.matmul(v_x, v_x)*(1-c)/s/s
     return R
 
 def compute_lv_axis(seg, lv_bp_id):

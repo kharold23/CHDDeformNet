@@ -70,7 +70,10 @@ class Prediction:
         for layer in self.model.layers:
             layer.trainable = False
         self.model.load_weights(self.model_name)
+        #dot_img_file = 'model.png'
+        #tf.keras.utils.plot_model(self.model, to_file=dot_img_file, show_shapes=True)
         self.mesh_tmplt = mesh_tmplt
+        self.out_fn = ""
         try:
             os.makedirs(os.path.dirname(self.out_fn))
         except Exception as e: print(e)
@@ -144,16 +147,28 @@ class Prediction:
             except:
                 print(weights)
        
-    def evaluate_dice(self):
+    def evaluate_dice(self, seg_id):
         print("Evaluating dice: ", self.image_fn, self.mesh_fn)
-        ref_im = sitk.ReadImage(self.mesh_fn)
-        ref_im, M = exportSitk2VTK(ref_im)
-        ref_im_py = swapLabels_ori(vtk_to_numpy(ref_im.GetPointData().GetScalars()))
+
+        im = sitk.ReadImage(self.image_fn)
+        ref_im, M = exportSitk2VTK(im)
+        ref_im_py = np.zeros(vtk_to_numpy(ref_im.GetPointData().GetScalars()).shape)
+        for m_fn, s_id in zip(self.mesh_fn, seg_id):
+            ref_m =  sitk.ReadImage(m_fn)
+            ref_m = resample_spacing(ref_m, template_size=im.GetSize(), order=0)[0]
+            ref_m, M = exportSitk2VTK(ref_m)
+            ref_m_py = swapLabels_ori(vtk_to_numpy(ref_m.GetPointData().GetScalars()))
+            if s_id == 3: # hard code for myocardium
+                mask = (ref_m_py==1) & (ref_im_py==0) 
+                ref_im_py[mask] = s_id
+            else:
+                ref_im_py[ref_m_py==1] = s_id
+
         pred_im_py = vtk_to_numpy(self.seg_result.GetPointData().GetScalars())
         dice_values = dice_score(pred_im_py, ref_im_py)
         return dice_values
     
-    def evaluate_assd(self):
+    def evaluate_assd(self, seg_id):
         def _get_assd(p_surf, g_surf):
             dist_fltr = vtk.vtkDistancePolyDataFilter()
             dist_fltr.SetInputData(1, p_surf)
@@ -162,11 +177,21 @@ class Prediction:
             dist_fltr.Update()
             distance_poly = vtk_to_numpy(dist_fltr.GetOutput().GetPointData().GetArray(0))
             return np.mean(distance_poly), dist_fltr.GetOutput()
-        ref_im =  sitk.ReadImage(self.mesh_fn)
-        ref_im = resample_spacing(ref_im, template_size=(256 , 256, 256), order=0)[0]
-        ref_im, M = exportSitk2VTK(ref_im)
-        ref_im_py = swapLabels_ori(vtk_to_numpy(ref_im.GetPointData().GetScalars()))
-        ref_im.GetPointData().SetScalars(numpy_to_vtk(ref_im_py))
+
+        im = sitk.ReadImage(self.image_fn)
+        ref_im, M = exportSitk2VTK(im)
+        out_im_py = np.zeros(vtk_to_numpy(ref_im.GetPointData().GetScalars()).shape)
+        for m_fn, s_id in zip(self.mesh_fn, seg_id):
+            ref_m =  sitk.ReadImage(m_fn)
+            ref_m = resample_spacing(ref_m, template_size=im.GetSize(), order=0)[0]
+            ref_m, M = exportSitk2VTK(ref_m)
+            ref_m_py = swapLabels_ori(vtk_to_numpy(ref_m.GetPointData().GetScalars()))
+            if s_id == 3: # hard code for myocardium
+                mask = (ref_m_py==1) & (out_im_py==0) 
+                out_im_py[mask] = s_id
+            else:
+                out_im_py[ref_m_py==1] = s_id
+        ref_im.GetPointData().SetScalars(numpy_to_vtk(out_im_py))
         
         dir_name = os.path.dirname(self.out_fn)
         base_name = os.path.basename(self.out_fn)
@@ -176,7 +201,7 @@ class Prediction:
         pred_im_py = swapLabels_ori(vtk_to_numpy(pred_im.GetPointData().GetScalars()))
         pred_im.GetPointData().SetScalars(numpy_to_vtk(pred_im_py))
 
-        ids = np.unique(ref_im_py)
+        ids = np.unique(out_im_py)
         pred_poly_l = []
         dist_poly_l = []
         ref_poly_l = []
@@ -232,7 +257,7 @@ class Prediction:
         for p, s_id in zip(self.prediction[-1], seg_id):
             pred_im = convertPolyDataToImageData(p, ref_im)
             pred_im_py = vtk_to_numpy(pred_im.GetPointData().GetScalars()) 
-            if s_id == 7: # hard code for pulmonary artery
+            if s_id == 3: # hard code for myocardium
                 mask = (pred_im_py==1) & (out_im_py==0) 
                 out_im_py[mask] = s_id 
             else:
@@ -318,6 +343,7 @@ if __name__ == '__main__':
                 print("processing "+x_filenames[i])
                 start2 = time.time()
                 out_fn = os.path.basename(x_filenames[i]).split('.')[0]
+
                 predict.set_image_info(m, x_filenames[i], args.size, os.path.join(args.output, out_fn), y_filenames[i], d_weights=args.d_weights, write=False)
               
                 predict.mesh_prediction()
@@ -326,8 +352,8 @@ if __name__ == '__main__':
                 end2 = time.time()
                 time_list2.append(end2-start2)
                 if y_filenames[i] is not None:
-                    score_list.append(predict.evaluate_dice())
-                    assd, haus = predict.evaluate_assd()
+                    score_list.append(predict.evaluate_dice(args.seg_id))
+                    assd, haus = predict.evaluate_assd(args.seg_id)
                     assd_list.append(assd)
                     haus_list.append(haus)
             if len(score_list) >0:
